@@ -15,7 +15,7 @@ from google import genai
 
 def create_beit3():
     model = beit3_large_patch16_384_retrieval(pretrained=True)
-    model.load_state_dict(torch.load(r'C:\Users\KHOI\Desktop\flask_mongo_backend\beit3\checkpoints\beit3_large_patch16_224.pth')['model'])
+    model.load_state_dict(torch.load('/workspace/backendAIC2025/beit3/checkpoints/beit3_large_patch16_224.pth')['model'])
 
     tokenizer = get_beit3_tokenizer()
     

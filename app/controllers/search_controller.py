@@ -266,7 +266,7 @@ def search_collection():
         if k <= 0:
             k = 100
         # safety cap
-        MAX_K = 500
+        MAX_K = 5000
         k = min(k, MAX_K)
 
         augment = bool(data.get("augment", False))
