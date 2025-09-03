@@ -41,7 +41,12 @@ def augment_query(query, num=5, llm=None):
 def create_faiss_index(embedding_root, metadata_root, model='beit3', get_metadata=False):
     D = 1024 if model == 'beit3' else 768
     index = faiss.IndexFlatIP(D)
-    
+    embedding_path = os.path.join(embedding_root, model)
+    if not os.path.isdir(embedding_path):
+        raise ValueError(f"{embedding_path} not found")
+    files = sorted(os.listdir(embedding_path))
+    if len(files) == 0:
+        current_app.logger.warning(f"No embedding files in {embedding_path}")
     metadata = []
     embedding_path = os.path.join(embedding_root, model)
     for embedding_file in sorted(os.listdir(embedding_path)):
