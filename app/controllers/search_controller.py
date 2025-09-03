@@ -25,6 +25,7 @@ _llm = None
 _index_beit = None
 _index_clip = None
 _index_metadata = None  # metadata kết hợp với index_beit (get_metadata=True)
+_index_clip_metadata = None
 DEVICE_DEFAULT = "cpu"
 
 
@@ -33,7 +34,7 @@ def _ensure_models(device=DEVICE_DEFAULT):
     Lazy initialize heavy models and FAISS indexes.
     Thread-safe basic guard with lock.
     """
-    global _models_initialized, _beit3, _beit3_tokenizer, _clip, _clip_tokenizer, _clip_preprocess, _llm, _index_beit, _index_clip, _index_metadata
+    global _models_initialized, _beit3, _beit3_tokenizer, _clip, _clip_tokenizer, _clip_preprocess, _llm, _index_beit, _index_clip, _index_metadata, _index_clip_metadata
 
     if _models_initialized:
         return
@@ -53,12 +54,12 @@ def _ensure_models(device=DEVICE_DEFAULT):
             _llm = create_llm()
             # create_faiss_index returns (index, metadata) when get_metadata=True
             _index_beit, _index_metadata = create_faiss_index("embedding-info", "metadata", model="beit3", get_metadata=True)
-            _index_clip, _ = create_faiss_index("embedding-info", "metadata", model="clip")
+            _index_clip, _index_clip_metadata = create_faiss_index("embedding-info", "metadata", model="clip", get_metadata=True)
         except Exception as e:
             current_app.logger.exception("Failed to initialize models/indexes: %s", e)
             # Don't raise here — let request handlers report error
             _beit3 = _beit3_tokenizer = _clip = _clip_tokenizer = _clip_preprocess = _llm = None
-            _index_beit = _index_clip = _index_metadata = None
+            _index_beit = _index_clip = _index_metadata = _index_clip_metadata = None
 
         _models_initialized = True
         current_app.logger.info("Model/index initialization complete.")
@@ -266,7 +267,7 @@ def search_collection():
         if k <= 0:
             k = 100
         # safety cap
-        MAX_K = 500
+        MAX_K = 5000
         k = min(k, MAX_K)
 
         augment = bool(data.get("augment", False))
@@ -302,7 +303,7 @@ def search_collection():
             model = (_clip, _clip_tokenizer, _clip_preprocess)
             index = _index_clip
             # if metadata left only with beit index, we still use that metadata if available
-            metadata = _index_metadata if _index_metadata is not None else []
+            metadata = _index_clip_metadata
 
         # If models/index failed to init, still allow fuzzy-only search
         if model[0] is None and (query1 or query2):
