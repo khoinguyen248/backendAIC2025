@@ -21,8 +21,7 @@ def create_app():
     mongo.init_app(app)
 
     # Init Mongo 2
-    app.config["MONGO_URI2"] = Config.MONGO_URI2
-    mongo2.init_app(app)
+    mongo2.init_app(app, uri=Config.MONGO_URI2)
 
     # --------------------
     # Health check

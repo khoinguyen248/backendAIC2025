@@ -1,4 +1,4 @@
-from ..extensions import mongo
+from ..extensions import mongo2
 
 def get_frames_collection():
-    return mongo.db.frames
+    return mongo2.db.frames

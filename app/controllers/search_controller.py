@@ -1,5 +1,6 @@
 # app/controllers/search_controller.py
 from flask import request, jsonify, current_app
+import re
 from ..models.eeiot_model import get_frames_collection
 from ..models.search_model import (
     create_beit3,
@@ -24,16 +25,12 @@ _clip_preprocess = None
 _llm = None
 _index_beit = None
 _index_clip = None
-_index_metadata = None  # metadata kết hợp với index_beit (get_metadata=True)
+_index_metadata = None
 _index_clip_metadata = None
 DEVICE_DEFAULT = "cpu"
 
 
 def _ensure_models(device=DEVICE_DEFAULT):
-    """
-    Lazy initialize heavy models and FAISS indexes.
-    Thread-safe basic guard with lock.
-    """
     global _models_initialized, _beit3, _beit3_tokenizer, _clip, _clip_tokenizer, _clip_preprocess, _llm, _index_beit, _index_clip, _index_metadata, _index_clip_metadata
 
     if _models_initialized:
@@ -44,20 +41,20 @@ def _ensure_models(device=DEVICE_DEFAULT):
             return
         current_app.logger.info("Initializing models and indexes (lazy)...")
 
-        # Device selection
         device_choice = device if torch.cuda.is_available() and device == "cuda" else "cpu"
 
         try:
-            # create model helpers (assume these functions exist and may download weights)
             _beit3, _beit3_tokenizer = create_beit3()
             _clip, _clip_tokenizer, _clip_preprocess = create_clip()
             _llm = create_llm()
-            # create_faiss_index returns (index, metadata) when get_metadata=True
-            _index_beit, _index_metadata = create_faiss_index("embedding-info", "metadata", model="beit3", get_metadata=True)
-            _index_clip, _index_clip_metadata = create_faiss_index("embedding-info", "metadata", model="clip", get_metadata=True)
+            _index_beit, _index_metadata = create_faiss_index(
+                "embedding-info", "metadata", model="beit3", get_metadata=True
+            )
+            _index_clip, _index_clip_metadata = create_faiss_index(
+                "embedding-info", "metadata", model="clip", get_metadata=True
+            )
         except Exception as e:
             current_app.logger.exception("Failed to initialize models/indexes: %s", e)
-            # Don't raise here — let request handlers report error
             _beit3 = _beit3_tokenizer = _clip = _clip_tokenizer = _clip_preprocess = _llm = None
             _index_beit = _index_clip = _index_metadata = _index_clip_metadata = None
 
@@ -65,11 +62,7 @@ def _ensure_models(device=DEVICE_DEFAULT):
         current_app.logger.info("Model/index initialization complete.")
 
 
-# ---------- Retrieval + fuzzy functions (kept from original, small tweaks) ----------
 def retrieve(query1, index, k, augment=False, query2=None, model=None, device="cpu", llm=None):
-    """
-    Use FAISS + optional augmentation (LLM) to return ranked list of top-k ids (indices into metadata).
-    """
     sims1, ids1 = faiss_search_results(query1, index, k, augment, model, device, llm)
     topk_ids1, topk_sims1 = topk_fusion(sims1, ids1)
 
@@ -133,10 +126,6 @@ def create_fuzzy_query(detection=None, objects=None, text=None):
 
 
 def fuzzy_search(collection, detection=None, objects=None, operator="AND", text=None, k=100):
-    """
-    Uses MongoDB Atlas Search via aggregation pipeline ($search).
-    Returns list of idx (indices) from documents matched.
-    """
     if collection is None:
         return []
 
@@ -147,17 +136,9 @@ def fuzzy_search(collection, detection=None, objects=None, operator="AND", text=
     if od_query == []:
         od_clause = []
     else:
-        od_clause = (
-            [{"compound": {"must": od_query}}]
-            if operator == "AND"
-            else [{"compound": {"should": od_query}}]
-        )
+        od_clause = [{"compound": {"must": od_query}}] if operator == "AND" else [{"compound": {"should": od_query}}]
 
-    clause = (
-        []
-        if ob_query == [] and od_query == []
-        else [{"compound": {"must": ob_query + od_clause}}]
-    )
+    clause = [] if ob_query == [] and od_query == [] else [{"compound": {"must": ob_query + od_clause}}]
 
     pipeline = [
         {"$search": {"index": "default", "compound": {"must": clause}}},
@@ -176,11 +157,22 @@ def fuzzy_search(collection, detection=None, objects=None, operator="AND", text=
         return []
 
 
-def search_logic(collection, metadata, model=None, query1=None, index=None, augment=False, k=100, query2=None, llm=None, detection=None, objects=None, operator="AND", text=None, device="cpu"):
-    """
-    Core fusion logic between FAISS results and fuzzy_search results.
-    Returns tuple (topk_indices, frame_paths)
-    """
+def search_logic(
+    collection,
+    metadata,
+    model=None,
+    query1=None,
+    index=None,
+    augment=False,
+    k=100,
+    query2=None,
+    llm=None,
+    detection=None,
+    objects=None,
+    operator="AND",
+    text=None,
+    device="cpu",
+):
     topk = None
     frame_paths = []
 
@@ -209,20 +201,7 @@ def search_logic(collection, metadata, model=None, query1=None, index=None, augm
         topk = sorted(zip(topk_faiss, reranking), key=lambda x: x[1], reverse=True)
         topk = [idx for idx, _ in topk]
 
-    if topk:
-        # metadata is expected to be a list-like where metadata[idx] yields a dict
-        try:
-            frame_paths = [metadata[idx] for idx in topk]
-        except Exception:
-            # if metadata stored differently, try lookup by 'idx' field
-            frame_paths = []
-            for idx in topk:
-                if isinstance(metadata, dict):
-                    frame_paths.append(metadata.get(idx))
-                else:
-                    frame_paths.append(None)
-
-    else:
+    if not topk:
         topk = []
 
     return topk, frame_paths
@@ -230,7 +209,6 @@ def search_logic(collection, metadata, model=None, query1=None, index=None, augm
 
 def temporal_search(metadata, frame_idx=-1):
     frame_paths = []
-    # safe bounds
     start = max(0, frame_idx - 10)
     end = min(len(metadata), frame_idx + 10)
     for idx in range(start, end):
@@ -238,60 +216,43 @@ def temporal_search(metadata, frame_idx=-1):
     return frame_paths
 
 
-# ---------- Flask-facing controller function ----------
 def search_collection():
-    """
-    Controller to be called by route. Reads parameters from request.json and returns JSON result.
-
-    Expected request.json keys (all optional, sensible defaults):
-    {
-        "query1": "text query for model 1 (beit3/clip)",
-        "query2": "optional second query for fusion/ reranking",
-        "model": "beit3" or "clip",          # default: "beit3"
-        "k": 100,
-        "augment": false,                    # use LLM augmentation
-        "detection": ["a1car","e1person"],   # list or comma separated string
-        "objects": "car person",             # string
-        "operator": "AND" or "OR",           # default: "AND"
-        "text": "some textual filter",       # text filter for mongo fuzzy search
-        "device": "cpu" or "cuda"
-    }
-    """
     try:
         data = request.get_json(force=True, silent=True) or {}
-        # parse parameters
+        current_app.logger.info("Received request data: %s", data)
+
         query1 = data.get("query1")
         query2 = data.get("query2")
         model_name = (data.get("model") or "beit3").lower()
         k = int(data.get("k", 100))
         if k <= 0:
             k = 100
-        # safety cap
-        MAX_K = 5000
-        k = min(k, MAX_K)
+        k = min(k, 5000)
 
         augment = bool(data.get("augment", False))
         detection = data.get("detection")
-        # allow "a,b,c" string
+
         if isinstance(detection, str):
             detection = [x.strip() for x in detection.split(",") if x.strip()]
+
+        current_app.logger.info("Parsed detection groups: %s", detection)
+
         objects = data.get("objects")
         operator = (data.get("operator") or "AND").upper()
         if operator not in ("AND", "OR"):
             operator = "AND"
         text = data.get("text")
-        device = data.get("device", DEVICE_DEFAULT)
-        use_llm = data.get("use_llm", augment)  # alternative flag
+        device = data.get("device", "cpu")
+        use_llm = data.get("use_llm", augment)
 
-        # prepare collection
         collection = get_frames_collection()
+        current_app.logger.info("Frames collection: %s", collection)
+
         if collection is None:
             return jsonify({"ok": False, "error": "frames collection not available"}), 500
 
-        # ensure models/indexes initialised once
         _ensure_models(device=device)
 
-        # choose model and index
         model = None
         index = None
         metadata = None
@@ -302,18 +263,15 @@ def search_collection():
         else:
             model = (_clip, _clip_tokenizer, _clip_preprocess)
             index = _index_clip
-            # if metadata left only with beit index, we still use that metadata if available
             metadata = _index_clip_metadata
 
-        # If models/index failed to init, still allow fuzzy-only search
         if model[0] is None and (query1 or query2):
             current_app.logger.warning("Model or index not available, falling back to fuzzy-only search.")
             query1 = None
             query2 = None
             index = None
 
-        # perform search
-        topk, frame_paths = search_logic(
+        topk, _ = search_logic(
             collection=collection,
             metadata=metadata,
             model=model,
@@ -330,7 +288,49 @@ def search_collection():
             device=device,
         )
 
-        return jsonify({"ok": True, "count": len(topk), "topk": topk, "paths": frame_paths}), 200
+        # --- FIX: Query lại Mongo để trả document đầy đủ ---
+        docs = []
+        if topk:
+            cursor = collection.find(
+                {"idx": {"$in": topk}},
+                {
+                    "_id": 0,
+                    "idx": 1,
+                    "path": 1,
+                    "video_url": 1,
+                    "L": 1,
+                    "V": 1,
+                    "frame_id": 1,
+                    "fps": 1,
+                    "frame_stamp": 1,
+                    "objects": 1,
+                    "detection": 1,
+                    "text": 1,
+                },
+            )
+            doc_map = {doc["idx"]: doc for doc in cursor}
+
+            for idx in topk:
+                docs.append(
+                    doc_map.get(
+                        idx,
+                        {
+                            "idx": idx,
+                            "path": "",
+                            "video_url": "",
+                            "L": "",
+                            "V": "",
+                            "frame_id": None,
+                            "fps": None,
+                            "frame_stamp": None,
+                            "objects": "",
+                            "detection": "",
+                            "text": [],
+                        },
+                    )
+                )
+
+        return jsonify({"ok": True, "count": len(docs), "topk": topk, "paths": docs}), 200
 
     except Exception as e:
         current_app.logger.exception("search_collection failed: %s", e)

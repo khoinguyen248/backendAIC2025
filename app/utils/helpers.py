@@ -42,22 +42,49 @@ def create_faiss_index(embedding_root, metadata_root, model='beit3', get_metadat
     D = 1024 if model == 'beit3' else 768
     index = faiss.IndexFlatIP(D)
     embedding_path = os.path.join(embedding_root, model)
+    
     if not os.path.isdir(embedding_path):
         raise ValueError(f"{embedding_path} not found")
+    
     files = sorted(os.listdir(embedding_path))
     if len(files) == 0:
-        current_app.logger.warning(f"No embedding files in {embedding_path}")
-    metadata = []
-    embedding_path = os.path.join(embedding_root, model)
-    for embedding_file in sorted(os.listdir(embedding_path)):
-
-        with open(os.path.join(embedding_path, embedding_file), 'rb') as f:
-            embedding = np.load(f)
-        index.add(embedding)
+        # Sử dụng logging an toàn cho cả Flask và non-Flask
+        try:
+            from flask import current_app
+            current_app.logger.warning(f"No embedding files in {embedding_path}")
+        except (ImportError, RuntimeError):
+            print(f"Warning: No embedding files in {embedding_path}")
     
-        if get_metadata == True:
-            with open(os.path.join(metadata_root, embedding_file.replace('.npy', '.json')), 'r', encoding='utf-8') as f:
-                metadata.extend(json.load(f))
+    metadata = []
+    
+    for embedding_file in sorted(os.listdir(embedding_path)):
+        try:
+            with open(os.path.join(embedding_path, embedding_file), 'rb') as f:
+                embedding = np.load(f)
+            index.add(embedding)
+            
+            if get_metadata:
+                metadata_file = os.path.join(metadata_root, embedding_file.replace('.npy', '.json'))
+                if os.path.exists(metadata_file):
+                    with open(metadata_file, 'r', encoding='utf-8') as f:
+                        metadata.extend(json.load(f))
+                else:
+                    # Log warning an toàn
+                    try:
+                        from flask import current_app
+                        current_app.logger.warning(f"Metadata file not found: {metadata_file}")
+                    except (ImportError, RuntimeError):
+                        print(f"Warning: Metadata file not found: {metadata_file}")
+                        
+        except Exception as e:
+            # Xử lý lỗi an toàn cho cả Flask và non-Flask
+            error_msg = f"Error processing file {embedding_file}: {str(e)}"
+            try:
+                from flask import current_app
+                current_app.logger.error(error_msg)
+            except (ImportError, RuntimeError):
+                print(f"Error: {error_msg}")
+            continue
 
     return index, metadata
 
