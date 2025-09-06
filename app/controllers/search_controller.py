@@ -26,13 +26,12 @@ _llm = None
 _index_beit = None
 _index_clip = None
 _index_metadata = None
-_index_clip_metadata = None
+# _index_clip_metadata = None
 DEVICE_DEFAULT = "cpu"
 
 
 def _ensure_models(device=DEVICE_DEFAULT):
-    global _models_initialized, _beit3, _beit3_tokenizer, _clip, _clip_tokenizer, _clip_preprocess, _llm, _index_beit, _index_clip, _index_metadata, _index_clip_metadata
-
+    global _models_initialized, _beit3, _beit3_tokenizer, _clip, _clip_tokenizer, _clip_preprocess, _llm, _index_beit, _index_clip, _index_metadata
     if _models_initialized:
         return
 
@@ -50,40 +49,63 @@ def _ensure_models(device=DEVICE_DEFAULT):
             _index_beit, _index_metadata = create_faiss_index(
                 "embedding-info", "metadata", model="beit3", get_metadata=True
             )
-            _index_clip, _index_clip_metadata = create_faiss_index(
-                "embedding-info", "metadata", model="clip", get_metadata=True
+            _index_clip, _ = create_faiss_index(
+                "embedding-info", "metadata", model="clip", get_metadata=False
             )
         except Exception as e:
             current_app.logger.exception("Failed to initialize models/indexes: %s", e)
             _beit3 = _beit3_tokenizer = _clip = _clip_tokenizer = _clip_preprocess = _llm = None
-            _index_beit = _index_clip = _index_metadata = _index_clip_metadata = None
+            _index_beit = _index_clip = None
 
         _models_initialized = True
         current_app.logger.info("Model/index initialization complete.")
 
 
-def retrieve(query1, index, k, augment=False, query2=None, model=None, device="cpu", llm=None):
-    sims1, ids1 = faiss_search_results(query1, index, k, augment, model, device, llm)
-    topk_ids1, topk_sims1 = topk_fusion(sims1, ids1)
+def retrieve(query1, index, k, augment=False, query2=None, query3=None, model=None, device='cpu', llm=None):
+	sims1, ids1 = faiss_search_results(query1, index, k, augment, model, device, llm)
+	topk_ids1, topk_sims1 = topk_fusion(sims1, ids1)
+ 
+ 
+	if query2 is not None:
+		sims2, ids2 = faiss_search_results(query2, index, k, augment, model, device, llm)
+		topk_ids2, topk_sims2 = topk_fusion(sims2, ids2)
 
-    if query2 is not None:
-        sims2, ids2 = faiss_search_results(query2, index, k, augment, model, device, llm)
-        topk_ids2, topk_sims2 = topk_fusion(sims2, ids2)
+		topk_ids3, topk_sims3 = [], []
+		if query3 is not None:
+			sims3, ids3 = faiss_search_results(query3, index, k, augment, model, device, llm)
+			topk_ids3, topk_sims3 = topk_fusion(sims3, ids3)
 
-        reranking = []
-        map2 = dict(zip(topk_ids2, range(len(topk_ids2))))
-        set_ids2 = set(topk_ids2)
-        for i, idx1 in enumerate(topk_ids1):
-            fusion_rank = topk_sims1[i]
-            for offset in range(6):
-                if (idx1 + offset) in set_ids2:
-                    fusion_rank = max(fusion_rank, topk_sims2[map2[idx1 + offset]])
-            reranking.append(fusion_rank)
+		reranking = []
+		map2= dict(zip(topk_ids2, range(k)))
+		map3= dict(zip(topk_ids3, range(k)))
+		
+		set_ids2 = set(topk_ids2)
+		set_ids3 = set(topk_ids3)
+		
+		for i, idx1 in enumerate(topk_ids1):
+			max_sim = 0
+			for offset in range(10):
+				temp_sim1 = topk_sims1[i]
+				if idx1 + offset in set_ids2:
+					temp_sim1 += (topk_sims2[map2[idx1+offset]]) # 1/(60+map[idx1+offset])
 
-        map_rerank = dict(zip(topk_ids1, reranking))
-        topk_ids1 = list(sorted(topk_ids1, key=lambda x: map_rerank[x], reverse=True))
+					temp_sim2 = 0
+					if query3 is not None:
+						for offset2 in range(10):
+							if idx1+offset+offset2 in set_ids3:
+								temp_sim2 = max(temp_sim2, topk_sims3[map3[idx1+offset+offset2]])
+					temp_sim1 += temp_sim2
 
-    return topk_ids1
+	 
+				max_sim = max(max_sim, temp_sim1)
+			reranking.append(max_sim)
+
+		map = list(zip(topk_ids1, reranking))
+		zip_sorted= list(sorted(map, key=lambda x: x[1], reverse=True))
+  
+		topk_ids1, _ = zip(*zip_sorted)
+
+	return topk_ids1
 
 
 def create_fuzzy_query(detection=None, objects=None, text=None):
@@ -166,6 +188,7 @@ def search_logic(
     augment=False,
     k=100,
     query2=None,
+    query3=None,
     llm=None,
     detection=None,
     objects=None,
@@ -175,9 +198,11 @@ def search_logic(
 ):
     topk = None
     frame_paths = []
+    topk_faiss = []
+    topk_fuzzy = []
 
     if query1 is not None and index is not None and model is not None:
-        topk_faiss = retrieve(query1, index, k, augment, query2, model, device, llm)
+        topk_faiss = retrieve(query1, index, k, augment, query2, query3, model, device, llm)
     else:
         topk_faiss = []
 
@@ -194,16 +219,19 @@ def search_logic(
         reranking = []
         for i, idx in enumerate(topk_faiss):
             if idx in idx_set:
-                reranking.append(1 / (1000 + i) + 1 / (1000 + mapping[idx]))
+                reranking.append(1 / (100 + i) + 1 / (100 + mapping[idx]))
             else:
-                reranking.append(1 / (1000 + i))
+                reranking.append(1 / (100 + i))
 
         topk = sorted(zip(topk_faiss, reranking), key=lambda x: x[1], reverse=True)
         topk = [idx for idx, _ in topk]
-
+    # current_app.logger.info(topk)
+    current_app.logger.info(len(metadata)) 
     if not topk:
         topk = []
-
+    else:
+        frame_paths = [metadata[idx]['path'] for idx in topk]
+    
     return topk, frame_paths
 
 
@@ -223,6 +251,7 @@ def search_collection():
 
         query1 = data.get("query1")
         query2 = data.get("query2")
+        query3 = data.get("query3")
         model_name = (data.get("model") or "beit3").lower()
         k = int(data.get("k", 100))
         if k <= 0:
@@ -263,15 +292,16 @@ def search_collection():
         else:
             model = (_clip, _clip_tokenizer, _clip_preprocess)
             index = _index_clip
-            metadata = _index_clip_metadata
+            metadata = _index_metadata
 
-        if model[0] is None and (query1 or query2):
+        if model[0] is None and (query1 or query2 or query3):
             current_app.logger.warning("Model or index not available, falling back to fuzzy-only search.")
             query1 = None
             query2 = None
+            query3 = None
             index = None
 
-        topk, _ = search_logic(
+        topk, frame_paths = search_logic(
             collection=collection,
             metadata=metadata,
             model=model,
@@ -280,6 +310,7 @@ def search_collection():
             augment=augment,
             k=k,
             query2=query2,
+            query3=query3,
             llm=_llm if use_llm else None,
             detection=detection,
             objects=objects,
@@ -288,7 +319,7 @@ def search_collection():
             device=device,
         )
 
-        # --- FIX: Query lại Mongo để trả document đầy đủ ---
+       
         docs = []
         if topk:
             cursor = collection.find(
@@ -330,7 +361,7 @@ def search_collection():
                     )
                 )
 
-        return jsonify({"ok": True, "count": len(docs), "topk": topk, "paths": docs}), 200
+        return jsonify({"ok": True, "count": len(docs), "results": docs}), 200
 
     except Exception as e:
         current_app.logger.exception("search_collection failed: %s", e)

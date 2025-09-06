@@ -35,7 +35,7 @@ def get_beit3_tokenizer():
 
 def augment_query(query, num=5, llm=None):
     response = llm.models.generate_content(model="gemini-2.5-flash-lite",
-                                            contents=f"Sinh thêm cho tôi {num} câu bằng tiếng Anh tương tự ngữ nghĩa của \"{query}\" cho mục đích tăng cường dữ liệu huấn luyện mô hình Deep Learning, trả về dạng một chuỗi các câu cách nhau bởi dấu #")
+                                            contents=f"Bạn hãy vào vai là một chuyên gia tạo prompt cho Gemini, sinh thêm cho tôi {num} câu bằng tiếng Anh tương tự ngữ nghĩa của \"{query}\" cho mục đích tăng cường dữ liệu huấn luyện mô hình Deep Learning, trả về dạng một chuỗi các câu cách nhau bởi dấu #, no yapping")
     return response.text.split(" #")
 
 def create_faiss_index(embedding_root, metadata_root, model='beit3', get_metadata=False):
