@@ -177,6 +177,56 @@ def fuzzy_search(collection, detection=None, objects=None, operator="AND", text=
     except Exception as e:
         current_app.logger.exception("fuzzy_search aggregation failed: %s", e)
         return []
+    
+
+def load_metadata_file(L: int):
+    """Xác định và load file metadata dựa theo L"""
+    if L <= 20:
+        filename = f"K{L:02d}.json"
+    else:
+        filename = f"L{L:02d}.json"
+    base_dir = os.path.abspath(os.path.join(current_app.root_path, os.pardir))
+    folder = os.path.join(base_dir, "metadata")
+
+    filepath = os.path.join(folder, filename)
+
+    if not os.path.exists(filepath):
+        return None, f"File {filename} not found"
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data, None
+    except Exception as e:
+        return None, str(e)
+
+
+def temporal_frames():
+    """API lấy frame theo idx và trả về kèm ±10"""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        L = int(data.get("L"))
+        V = str(data.get("V"))
+        idx = int(data.get("idx"))
+
+        items, err = load_metadata_file(L)
+        if err:
+            return jsonify({"ok": False, "error": err}), 404
+
+        # tìm vị trí idx
+        target_index = next((i for i, item in enumerate(items) if item.get("idx") == idx), None)
+        if target_index is None:
+            return jsonify({"ok": False, "error": f"idx {idx} not found"}), 404
+
+        start = max(0, target_index - 10)
+        end = min(len(items), target_index + 11)  # +1 để include target
+        result = items[start:end]
+
+        return jsonify({"ok": True, "count": len(result), "results": result}), 200
+
+    except Exception as e:
+        current_app.logger.exception("temporal_frames failed: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def search_logic(
@@ -214,6 +264,8 @@ def search_logic(
         topk = topk_fuzzy
     else:
         mapping = dict(zip(topk_fuzzy, range(len(topk_fuzzy))))
+        current_app.logger.info(len(topk_faiss))
+        current_app.logger.info(len(topk_fuzzy))
         idx_set = set(topk_fuzzy)
 
         reranking = []
