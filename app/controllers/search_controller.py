@@ -179,15 +179,25 @@ def fuzzy_search(collection, detection=None, objects=None, operator="AND", text=
         return []
     
 
-def load_metadata_file(L: int):
-    """Xác định và load file metadata dựa theo L"""
-    if L <= 20:
-        filename = f"K{L:02d}.json"
+def load_metadata_file(L: str):
+    """Xác định và load file metadata dựa theo L (có thể có hậu tố như 26_b)"""
+    raw_L = str(L)
+
+    # Tách số đầu tiên ra để biết K hay L
+    match = re.match(r"(\d+)", raw_L)
+    if not match:
+        return None, f"Invalid L value: {raw_L}"
+
+    num = int(match.group(1))
+
+    # Giữ nguyên hậu tố
+    if num <= 20:
+        filename = f"K{raw_L}.json"  # VD: K01.json hoặc K05_a.json
     else:
-        filename = f"L{L:02d}.json"
+        filename = f"L{raw_L}.json"  # VD: L26.json hoặc L26_b.json
+
     base_dir = os.path.abspath(os.path.join(current_app.root_path, os.pardir))
     folder = os.path.join(base_dir, "metadata")
-
     filepath = os.path.join(folder, filename)
 
     if not os.path.exists(filepath):
@@ -205,7 +215,7 @@ def temporal_frames():
     """API lấy frame theo idx và trả về kèm ±10"""
     try:
         data = request.get_json(force=True, silent=True) or {}
-        L = int(data.get("L"))
+        L = str(data.get("L"))  # Giữ nguyên string, có thể là '26_b'
         V = str(data.get("V"))
         idx = int(data.get("idx"))
 
@@ -213,7 +223,7 @@ def temporal_frames():
         if err:
             return jsonify({"ok": False, "error": err}), 404
 
-        # tìm vị trí idx
+        # Tìm vị trí idx
         target_index = next((i for i, item in enumerate(items) if item.get("idx") == idx), None)
         if target_index is None:
             return jsonify({"ok": False, "error": f"idx {idx} not found"}), 404
