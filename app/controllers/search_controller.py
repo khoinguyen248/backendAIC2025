@@ -254,47 +254,65 @@ def search_logic(
     objects=None,
     operator="AND",
     text=None,
+    temporal_fuzzy=-1,
     device="cpu",
 ):
     topk = None
-    frame_paths = []
     topk_faiss = []
     topk_fuzzy = []
 
-    if query1 is not None and index is not None and model is not None:
-        topk_faiss = retrieve(query1, index, k, augment, query2, query3, model, device, llm)
+    if temporal_fuzzy != -1:
+        topk_fuzzy = fuzzy_search(collection, detection, objects, operator, text, k)
+        if topk_fuzzy == []:
+            return [], []
+        if temporal_fuzzy == 1 and query2 != None:
+            topk_faiss2 = retrieve(query2, index, k, augment, None, None, model, device, llm)
+            topk_faiss3 = retrieve(query3, index, k, augment, None, None, model, device, llm) if query3 != None else []
+            topk = RRF_ranking(topk_fuzzy, topk_faiss2, topk_faiss3)
+        elif temporal_fuzzy == 2 and query1 != None:
+            current_app.logger.info(query1)
+            topk_faiss1 = retrieve(query1, index, k, augment, None, None, model, device, llm)
+            topk_faiss3 = retrieve(query3, index, k, augment, None, None, model, device, llm) if query3 != None else []
+            topk = RRF_ranking(topk_faiss1, topk_fuzzy, topk_faiss3)
+        elif temporal_fuzzy == 3 and query2 != None and query1 != None:
+            topk_faiss1 = retrieve(query1, index, k, augment, None, None, model, device, llm)
+            topk_faiss2 = retrieve(query2, index, k, augment, None, None, model, device, llm)
+            topk = RRF_ranking(topk_faiss1, topk_faiss2, topk_fuzzy)
+
     else:
-        topk_faiss = []
+        if query1 is not None and index is not None and model is not None:
+            topk_faiss = retrieve(query1, index, k, augment, query2, query3, model, device, llm)
+        else:
+            topk_faiss = []
 
-    topk_fuzzy = fuzzy_search(collection, detection, objects, operator, text, k)
+        topk_fuzzy = fuzzy_search(collection, detection, objects, operator, text, k)
 
-    if topk_fuzzy == []:
-        topk = topk_faiss
-    elif topk_faiss == []:
-        topk = topk_fuzzy
-    else:
-        mapping = dict(zip(topk_fuzzy, range(len(topk_fuzzy))))
-        current_app.logger.info(len(topk_faiss))
-        current_app.logger.info(len(topk_fuzzy))
-        idx_set = set(topk_fuzzy)
+        if topk_fuzzy == []:
+            topk = topk_faiss
+        elif topk_faiss == []:
+            topk = topk_fuzzy
+        else:
+            mapping = dict(zip(topk_fuzzy, range(len(topk_fuzzy))))
+            current_app.logger.info(len(topk_faiss))
+            current_app.logger.info(len(topk_fuzzy))
+            idx_set = set(topk_fuzzy)
 
-        reranking = []
-        for i, idx in enumerate(topk_faiss):
-            if idx in idx_set:
-                reranking.append(1 / (100 + i) + 1 / (100 + mapping[idx]))
-            else:
-                reranking.append(1 / (100 + i))
+            reranking = []
+            for i, idx in enumerate(topk_faiss):
+                if idx in idx_set:
+                    reranking.append(1 / (100 + i) + 1 / (100 + mapping[idx]))
+                else:
+                    reranking.append(1 / (100 + i))
 
-        topk = sorted(zip(topk_faiss, reranking), key=lambda x: x[1], reverse=True)
-        topk = [idx for idx, _ in topk]
+            topk = sorted(zip(topk_faiss, reranking), key=lambda x: x[1], reverse=True)
+            topk = [idx for idx, _ in topk]
     # current_app.logger.info(topk)
     current_app.logger.info(len(metadata)) 
     if not topk:
         topk = []
-    else:
-        frame_paths = [metadata[idx]['path'] for idx in topk]
+
     
-    return topk, frame_paths
+    return topk
 
 
 def temporal_search(metadata, frame_idx=-1):
@@ -305,6 +323,30 @@ def temporal_search(metadata, frame_idx=-1):
         frame_paths.append(metadata[idx].get("idx") if isinstance(metadata[idx], dict) else metadata[idx])
     return frame_paths
 
+def RRF_ranking(topk1, topk2, topk3, wd=10):
+	map2 = dict(zip(topk2, range(len(topk2))))
+	map3 = dict(zip(topk3, range(len(topk3))))
+	
+	set_idx2 = set(topk2)
+	set_idx3 = set(topk3)
+	
+	reranking = []
+	for i, idx1 in enumerate(topk1):
+		reranking.append(1/(100+i))
+		for offset1 in range(wd):
+			if idx1+offset1 in set_idx2:
+				reranking[-1]+=1/(100.0+map2[idx1+offset1])
+				for offset2 in range(wd):
+					if idx1+offset1+offset2 in set_idx3:
+						reranking[-1]+=1/(100.0+map3[idx1+offset1+offset2])
+	
+	map = list(zip(topk1, reranking))
+	zip_sorted= list(sorted(map, key=lambda x: x[1], reverse=True))
+
+	topk1, _ = zip(*zip_sorted)
+	current_app.logger.info(topk1)
+	return topk1
+
 
 def search_collection():
     try:
@@ -314,6 +356,7 @@ def search_collection():
         query1 = data.get("query1")
         query2 = data.get("query2")
         query3 = data.get("query3")
+        temporal_fuzzy = data.get("temporal_fuzzy")
         model_name = (data.get("model") or "beit3").lower()
         k = int(data.get("k", 100))
         if k <= 0:
@@ -363,7 +406,7 @@ def search_collection():
             query3 = None
             index = None
 
-        topk, frame_paths = search_logic(
+        topk = search_logic(
             collection=collection,
             metadata=metadata,
             model=model,
@@ -377,8 +420,10 @@ def search_collection():
             detection=detection,
             objects=objects,
             operator=operator,
+            temporal_fuzzy=temporal_fuzzy,
             text=text,
             device=device,
+            
         )
 
        
